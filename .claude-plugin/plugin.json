@@ -1,0 +1,48 @@
+{
+  "name": "grip-session-mesh",
+  "version": "1.0.0",
+  "description": "Three-layer Claude Code session mesh: local WebSocket bus, Tailscale cross-machine relay, and presence/locking. The definitive pair programming solution.",
+  "author": "CodeTonight-SA",
+  "license": "MIT",
+  "homepage": "https://github.com/CodeTonight-SA/grip-session-mesh",
+  "skillsDir": "skills",
+  "mcpServers": {
+    "grip-presence": {
+      "command": "node",
+      "args": ["presence/dist/index.js"],
+      "description": "Presence registry, advisory locks, broadcast inbox (Layer 3)",
+      "autoStart": false
+    }
+  },
+  "config": {
+    "port": {
+      "type": "number",
+      "default": 9474,
+      "description": "WebSocket bus port (Layer 1)"
+    },
+    "auto_start": {
+      "type": "boolean",
+      "default": false,
+      "description": "Auto-start the mesh server on plugin load"
+    },
+    "idle_shutdown_minutes": {
+      "type": "number",
+      "default": 30,
+      "description": "Shutdown bus if no sessions connected for N minutes"
+    },
+    "presence_enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable Layer 3 presence MCP server"
+    }
+  },
+  "install": {
+    "steps": [
+      "cd server && npm install && npm run build",
+      "cd presence && npm install && npm run build",
+      "pip install -r relay/requirements.txt --quiet",
+      "mkdir -p ~/.grip-session-mesh",
+      "python relay/mesh_relay.py --init-token"
+    ]
+  }
+}

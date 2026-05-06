@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.js.map
+.env
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+venv/
+.DS_Store
+~/.grip-session-mesh/token
+~/.grip-session-mesh/presence.db
