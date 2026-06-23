@@ -46,6 +46,16 @@ def read_token() -> str:
     return TOKEN_FILE.read_text().strip()
 
 
+def auth_envelope(token: str) -> dict:
+    """First-message auth envelope the bus expects (see server/src/index.ts).
+
+    The bus authenticates on the first WebSocket *message*, not an HTTP header.
+    The relay registers with relay=True so the bus forwards unroutable direct
+    messages and broadcasts to it for cross-machine delivery.
+    """
+    return {"authorization": f"Bearer {token}", "relay": True}
+
+
 # ---------------------------------------------------------------------------
 # TCP frame helpers
 # ---------------------------------------------------------------------------
@@ -83,6 +93,16 @@ async def _tcp_to_ws(reader: asyncio.StreamReader, ws) -> None:
             print(f"[relay] ws send error: {exc}", file=sys.stderr)
 
 
+async def _authenticate(ws, token: str) -> None:
+    """Authenticate to the local bus, then drain the registration ack.
+
+    The bus authenticates on the first WS message and replies with a JSON ack;
+    draining it here keeps the bridge loop seeing only forwarded mesh messages.
+    """
+    await ws.send(json.dumps(auth_envelope(token)))
+    await ws.recv()  # bus ack: {"ok": true, "relay": true, ...}
+
+
 async def relay_to_peer(peer_ip: str, token: str) -> None:
     """Maintain a persistent relay connection to one peer with exponential backoff."""
     import websockets
@@ -94,10 +114,8 @@ async def relay_to_peer(peer_ip: str, token: str) -> None:
 
     while True:
         try:
-            async with websockets.connect(
-                local_ws_url,
-                additional_headers={"Authorization": f"Bearer {token}"},
-            ) as ws:
+            async with websockets.connect(local_ws_url) as ws:
+                await _authenticate(ws, token)
                 reader, writer = await asyncio.open_connection(*tcp_target)
                 print(f"[relay] connected to peer {peer_ip}", file=sys.stderr)
                 delay = BACKOFF_SEQUENCE[0]  # reset on success
@@ -130,10 +148,8 @@ async def serve_incoming(
     peer = writer.get_extra_info("peername")
     print(f"[relay] incoming from {peer}", file=sys.stderr)
     try:
-        async with websockets.connect(
-            local_ws_url,
-            additional_headers={"Authorization": f"Bearer {token}"},
-        ) as ws:
+        async with websockets.connect(local_ws_url) as ws:
+            await _authenticate(ws, token)
             await asyncio.gather(
                 _tcp_to_ws(reader, ws),
                 _ws_to_tcp(ws, writer),

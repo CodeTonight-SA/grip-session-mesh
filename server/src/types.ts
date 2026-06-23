@@ -19,3 +19,19 @@ export interface Session {
 export interface AuthedSession extends Session {
   authenticated: boolean;
 }
+
+/**
+ * First-message auth envelope a connecting client sends. A normal session
+ * supplies a `name`; a relay (Layer 2) supplies `relay: true` and no name.
+ */
+export interface AuthEnvelope {
+  authorization?: string;
+  name?: string;
+  relay?: boolean;
+}
+
+/** Result of classifying an AuthEnvelope against the expected bearer token. */
+export type AuthDecision =
+  | { kind: 'session'; name: string }
+  | { kind: 'relay' }
+  | { kind: 'reject' };
