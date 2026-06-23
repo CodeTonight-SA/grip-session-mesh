@@ -121,5 +121,22 @@ class TestRemoteAddRemove(unittest.TestCase):
         self.assertEqual(peers.count(ip), 1)
 
 
+class TestAuthEnvelope(unittest.TestCase):
+    def test_auth_envelope_shape(self):
+        """The relay authenticates with a message envelope (not an HTTP header)
+        that the bus accepts: Bearer token + relay flag, no name."""
+        env = mesh_relay.auth_envelope("deadbeef")
+        self.assertEqual(env["authorization"], "Bearer deadbeef")
+        self.assertTrue(env["relay"])
+        # A relay registers without a session name.
+        self.assertNotIn("name", env)
+
+    def test_auth_envelope_is_json_serialisable(self):
+        """The envelope round-trips through JSON exactly (it is sent as text)."""
+        env = mesh_relay.auth_envelope("tok123")
+        restored = json.loads(json.dumps(env))
+        self.assertEqual(restored, {"authorization": "Bearer tok123", "relay": True})
+
+
 if __name__ == "__main__":
     unittest.main()
