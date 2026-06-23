@@ -7,6 +7,32 @@ import type { RateLimiter } from './ratelimit.js';
 const DIRECT_LIMIT = 10 * 1024 * 1024;   // 10 MB
 const BROADCAST_LIMIT = 256 * 1024;        // 256 KB
 
+// Message-id dedup. The bidirectional relay topology (A->B and B->A links both
+// forward) can push one message down two paths, so a peer bus can be asked to
+// deliver the same message twice. Message ids are globally unique (the client
+// mints crypto.randomUUID per send), so dropping an id we have already delivered
+// removes the duplicate and can never drop a distinct message. Bounded LRU.
+const SEEN_MAX = 4096;
+const seenIds = new Set<string>();
+const seenOrder: string[] = [];
+
+function alreadyDelivered(id: string): boolean {
+  if (seenIds.has(id)) return true;
+  seenIds.add(id);
+  seenOrder.push(id);
+  if (seenOrder.length > SEEN_MAX) {
+    const evicted = seenOrder.shift();
+    if (evicted !== undefined) seenIds.delete(evicted);
+  }
+  return false;
+}
+
+/** Test-only: clear dedup memory so cases do not leak ids into each other. */
+export function _resetDedup(): void {
+  seenIds.clear();
+  seenOrder.length = 0;
+}
+
 // Base directory is resolved per-call (not at module load) so tests can point
 // it at a temp dir via GRIP_MESH_DIR without spawning a fresh process.
 function meshDir(): string {
@@ -88,6 +114,11 @@ export function deliver(
   senderId: string,
   fromRelay = false,
 ): string {
+  // Drop a message id we have already delivered (relay double-push dedup).
+  if (alreadyDelivered(msg.id)) {
+    appendLog(msg, 'duplicate');
+    return 'duplicate';
+  }
   const result =
     msg.to === 'broadcast'
       ? deliverBroadcast(msg, registry, limiter, senderId, fromRelay)

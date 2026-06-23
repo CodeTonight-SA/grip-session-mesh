@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import { SessionRegistry } from '../src/session.js';
 import { RateLimiter } from '../src/ratelimit.js';
-import { deliver } from '../src/bus.js';
+import { deliver, _resetDedup } from '../src/bus.js';
 import type { WebSocket } from 'ws';
 import type { MeshMessage, AuthedSession } from '../src/types.js';
 
@@ -29,6 +29,7 @@ const prevMeshDir = process.env.GRIP_MESH_DIR;
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-bus-'));
   process.env.GRIP_MESH_DIR = tmpDir;
+  _resetDedup();
 });
 
 afterEach(() => {
@@ -110,5 +111,33 @@ describe('deliver — relay bridging', () => {
     assert.equal(relay.sent.length, 0); // not echoed back to the relay it came from
     const inbound = fs.readFileSync(path.join(tmpDir, 'inbound', 'sess-1.jsonl'), 'utf8').trim();
     assert.equal(JSON.parse(inbound).kind, 'broadcast');
+  });
+
+  test('a duplicate message id is dropped on the second delivery (relay double-push)', () => {
+    const reg = new SessionRegistry();
+    const lim = new RateLimiter();
+    reg.register(namedSession('sess-1', 'lauries'));
+    const m = msg('lauries', { id: 'dup-1' });
+
+    const first = deliver(m, reg, lim, 'relay-id', true);
+    const second = deliver(m, reg, lim, 'relay-id', true); // same id, second relay link
+
+    assert.equal(first, 'ok');
+    assert.equal(second, 'duplicate');
+    const inbound = fs.readFileSync(path.join(tmpDir, 'inbound', 'sess-1.jsonl'), 'utf8')
+      .trim().split('\n').filter(Boolean);
+    assert.equal(inbound.length, 1); // written exactly once despite two deliveries
+  });
+
+  test('distinct ids are both delivered (dedup does not over-match)', () => {
+    const reg = new SessionRegistry();
+    const lim = new RateLimiter();
+    reg.register(namedSession('sess-1', 'lauries'));
+
+    assert.equal(deliver(msg('lauries', { id: 'a' }), reg, lim, 'relay-id', true), 'ok');
+    assert.equal(deliver(msg('lauries', { id: 'b' }), reg, lim, 'relay-id', true), 'ok');
+    const inbound = fs.readFileSync(path.join(tmpDir, 'inbound', 'sess-1.jsonl'), 'utf8')
+      .trim().split('\n').filter(Boolean);
+    assert.equal(inbound.length, 2);
   });
 });
