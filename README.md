@@ -91,6 +91,47 @@ Add to your `.mcp.json` or Claude Code MCP settings:
 
 ---
 
+## Persistence (survive reboots)
+
+Layers 1-2 (bus + relay) plus the per-session client can be registered as OS
+services so the mesh comes back after a reboot with no commands to re-run. Build
+the server first (`npm install --prefix server && npm run build --prefix server`),
+and make sure a python that can `import websockets` is available for the relay.
+
+### macOS (launchd)
+
+```bash
+deploy/launchd/install-macos.sh [session-name]   # install + start now
+deploy/launchd/uninstall-macos.sh                # remove
+```
+
+### Windows (Scheduled Tasks)
+
+From Git Bash or PowerShell:
+
+```bash
+powershell -ExecutionPolicy Bypass -File deploy/windows/install-windows.ps1 [-SessionName <name>]
+powershell -ExecutionPolicy Bypass -File deploy/windows/uninstall-windows.ps1
+```
+
+Registers three per-user **ONLOGON** Scheduled Tasks (`GRIP Mesh Bus`,
+`GRIP Mesh Relay`, `GRIP Mesh Client`) that start at logon and restart on failure —
+the Task Scheduler mirror of launchd `RunAtLoad` + `KeepAlive`. No admin required
+(a per-user logon task needs no elevation).
+
+Requirements:
+
+- **Node.js** on `PATH` (bus + client).
+- A **python that can `import websockets`** — auto-detected from `~/.grip/venv`,
+  `~/.claude/venv`, or `python`/`python3` on `PATH`; override with `-Python <path>`.
+- The shared team **token must exist at `~/.grip-session-mesh/token`** (placed by
+  onboarding). The relay reads it at runtime; the installer never writes it.
+
+Verify with `Get-ScheduledTask -TaskName "GRIP Mesh*"`. Logs land in
+`~/.grip-session-mesh/logs/{bus,relay,client}.{out,err}.log`.
+
+---
+
 ## Architecture
 
 ```
