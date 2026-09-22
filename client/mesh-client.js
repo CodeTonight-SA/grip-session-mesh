@@ -36,6 +36,7 @@ if (!NAME) {
   process.exit(2);
 }
 const URL = process.argv[3] || 'ws://127.0.0.1:9474';
+const RECONNECT_MS = 2000;
 const MESH = path.join(os.homedir(), '.grip-session-mesh');
 const OUTBOX = path.join(MESH, 'outbound', `${NAME}.jsonl`);
 const IDFILE = path.join(MESH, `${NAME}.session`);
@@ -48,6 +49,7 @@ function token() {
 
 let ws = null;
 let pollTimer = null;
+let reconnectTimer = null;
 
 function startPolling() {
   stopPolling();
@@ -86,14 +88,40 @@ function drainOutbox() {
   }
 }
 
-function connect() {
-  ws = new WebSocket(URL);
+// Re-arm the reconnect. Both 'close' and 'error' call this, and only one timer
+// is ever pending, because the two fire in either order and sometimes both:
+//
+//   * A connection that OPENED and was then dropped (e.g. the bus rejecting a
+//     bad token with 4401) fires 'close'.
+//   * A connection REFUSED outright -- the bus not listening yet at logon --
+//     fires 'error' with NO 'close' behind it.
+//
+// Scheduling only from 'close' is what made the client die at every cold start:
+// nothing was queued, the event loop emptied, and node exited 0. Task Scheduler
+// read that 0 as success, so -RestartCount never fired and the client stayed
+// dead until the next logon. Measured on DESKTOP-6KG0VQ4 2026-09-22: the client
+// gave up 2.2s before the bus finished binding, and the mesh ran all day with
+// sessions:0. The bus and relay survive the same race because they bind a port
+// and depend on nobody; the client is the only one that dials out.
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, RECONNECT_MS);
+}
 
-  ws.addEventListener('open', () => {
-    ws.send(JSON.stringify({ authorization: `Bearer ${token()}`, name: NAME }));
+function connect() {
+  const sock = new WebSocket(URL);
+  ws = sock;
+  // Events from a superseded socket are ignored. Without this, 'error' then
+  // 'close' on the SAME dead socket would each schedule a reconnect once the
+  // first timer had already fired, and the single client would fan out into
+  // parallel connect chains hammering the bus.
+  const superseded = () => ws !== sock;
+
+  sock.addEventListener('open', () => {
+    sock.send(JSON.stringify({ authorization: `Bearer ${token()}`, name: NAME }));
   });
 
-  ws.addEventListener('message', (ev) => {
+  sock.addEventListener('message', (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
     if (m.ok && m.sessionId) {
@@ -103,14 +131,17 @@ function connect() {
     }
   });
 
-  ws.addEventListener('close', (ev) => {
+  sock.addEventListener('close', (ev) => {
+    if (superseded()) return;
     stopPolling();
-    console.log(`[mesh-client] disconnected (code=${ev.code}); reconnecting in 2s`);
-    setTimeout(connect, 2000);
+    console.log(`[mesh-client] disconnected (code=${ev.code}); reconnecting in ${RECONNECT_MS / 1000}s`);
+    scheduleReconnect();
   });
 
-  ws.addEventListener('error', (ev) => {
+  sock.addEventListener('error', (ev) => {
+    if (superseded()) return;
     console.error(`[mesh-client] ws error: ${ev.message || 'unknown'}`);
+    scheduleReconnect();
   });
 }
 
