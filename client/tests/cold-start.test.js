@@ -56,9 +56,17 @@ function freePort() {
  * mode 'accept' completes the handshake and holds the connection open.
  * mode 'destroy' accepts and immediately drops, to drive the retry path.
  */
-function wsServer(mode) {
+function wsServer(mode, reply) {
   const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
   let accepted = 0;
+  // Minimal server-to-client TEXT frame: FIN+opcode 0x81, then the length.
+  // Server frames are never masked, and every payload here is short, so the
+  // 7-bit length form is all that is needed.
+  const frame = (text) => {
+    const body = Buffer.from(text, 'utf8');
+    if (body.length > 125) throw new Error('test frame too long');
+    return Buffer.concat([Buffer.from([0x81, body.length]), body]);
+  };
   const srv = net.createServer((sock) => {
     accepted += 1;
     if (mode === 'destroy') { sock.destroy(); return; }
@@ -80,8 +88,12 @@ function wsServer(mode) {
         '',
         '',
       ].join(CRLF));
-      // Deliberately silent after this. The client sends its auth frame and
-      // waits; that is enough to prove the connection came up and stays up.
+      // With no reply configured, stay silent: the client sends its auth frame
+      // and waits, which is enough to prove the connection came up and stays up.
+      // With one, answer as the bus does so the registration path is exercised.
+      if (reply) {
+        sock.once('data', () => { try { sock.write(frame(JSON.stringify(reply))); } catch {} });
+      }
     });
     sock.on('error', () => {});
   });
@@ -261,4 +273,33 @@ test('a missing token is a failed attempt, not a fatal one', async (t) => {
   );
   const tried = c.stderr.split(String.fromCharCode(10)).filter((l) => l.includes('cannot read token')).length;
   assert.ok(tried >= 2, `expected repeated attempts while the token is absent, saw ${tried}`);
+});
+
+test('registers and records the session id the bus assigns', async (t) => {
+  // Nothing above this point proved the client ever REGISTERS -- the other
+  // tests turn on staying alive and on connection counts. The registration path
+  // runs in the 'message' handler, which writes the id file the receive Monitor
+  // reads, so an untested handler there means inbound routing is untested.
+  const port = await freePort();
+  const SESSION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const srv = wsServer('accept', { ok: true, sessionId: SESSION });
+  await srv.listen(port);
+  const c = spawnClient(`ws://${'127.0.0.1'}:${port}`);
+  t.after(async () => {
+    try { c.child.kill(); } catch {}
+    fs.rmSync(c.home, { recursive: true, force: true });
+    await srv.close();
+  });
+
+  await sleep(4000);
+  assert.equal(c.child.exitCode, null, `client exited: ${c.stderr.trim()}`);
+  assert.match(c.stdout, /registered name=/, `client never registered. stdout: ${c.stdout.trim()}`);
+
+  const idFile = path.join(c.home, '.grip-session-mesh', 'cold-start-probe.session');
+  assert.ok(fs.existsSync(idFile), 'session id file was not written');
+  assert.equal(
+    fs.readFileSync(idFile, 'utf8'),
+    SESSION,
+    'session id file does not hold the id the server assigned',
+  );
 });

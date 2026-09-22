@@ -184,10 +184,26 @@ function connect() {
   });
 
   sock.addEventListener('message', (ev) => {
+    // Guarded like its three siblings. Raised independently by two review seats,
+    // and they were right: a superseded socket delivering a registration reply
+    // would write a STALE session id to the file the receive Monitor reads, and
+    // start polling for a session the bus no longer holds -- inbound messages
+    // then go nowhere, silently. An unguarded handler among three guarded ones
+    // is a gap, not a style difference.
+    if (superseded()) return;
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
     if (m.ok && m.sessionId) {
-      fs.writeFileSync(IDFILE, m.sessionId);
+      // Same class as the token read below: a throw inside an event handler is
+      // an UNHANDLED exception that kills the daemon. The write can fail if the
+      // mesh directory is removed, is read-only, or the disk is full. Losing the
+      // id file costs the Monitor its inbound route; losing the process costs
+      // everything until the next logon.
+      try {
+        fs.writeFileSync(IDFILE, m.sessionId);
+      } catch (err) {
+        console.error(`[mesh-client] cannot write session id: ${(err && err.message) || err}`);
+      }
       console.log(`[mesh-client] registered name=${NAME} id=${m.sessionId}`);
       startPolling();
     }
