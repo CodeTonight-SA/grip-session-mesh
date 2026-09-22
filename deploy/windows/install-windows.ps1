@@ -169,10 +169,21 @@ function Install-MeshTask {
                                        -Argument ('"{0}" "{1}"' -f $VbsPath, $launcher) `
                                        -WorkingDirectory $RepoDir
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $MeshUser
+    # -DontStopOnIdleEnd is defence in depth, and is deliberately NOT a fix for
+    # anything observed. New-ScheduledTaskSettingsSet defaults StopOnIdleEnd to
+    # true, which tells Task Scheduler to STOP a running task when the machine
+    # stops being idle. It is inert while RunOnlyIfIdle stays false, so it has
+    # never fired here - checked on DESKTOP-6KG0VQ4 2026-09-22, all three tasks
+    # carried StopOnIdleEnd=true and none was stopped by it. But these are
+    # long-lived daemons that must never be stopped by a policy nobody set on
+    # purpose, and the default is one flag away from biting if RunOnlyIfIdle is
+    # ever switched on. Setting it explicitly costs nothing and removes the
+    # question.
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -DontStopOnIdleEnd `
         -MultipleInstances IgnoreNew
     # Interactive is deliberate, and the two alternatives were measured, not assumed:
     #   * -LogonType S4U runs non-interactively and would suppress the window by itself,

@@ -90,6 +90,15 @@ def audit(installer: str, shim: str) -> list[str]:
     if ", 0, True)" not in shim:
         bad.append("run-hidden.vbs must call Run(cmd, 0, True): 0 hides, True keeps the task Running")
 
+    # 5. New-ScheduledTaskSettingsSet defaults StopOnIdleEnd to true, which
+    #    stops a RUNNING task the moment the machine stops being idle. These
+    #    are long-lived daemons. It is inert while RunOnlyIfIdle stays false,
+    #    so this pins an explicit setting rather than a fix for an observed
+    #    failure -- the honest reason to keep it is that nothing should stop
+    #    the mesh because of a default nobody chose.
+    if "-DontStopOnIdleEnd" not in installer:
+        bad.append("settings omit -DontStopOnIdleEnd -> idle policy may stop a long-lived daemon")
+
     return bad
 
 
@@ -126,6 +135,7 @@ def test_audit_detects_the_original_defect() -> None:
     assert "destroys the task" in joined
     assert "-Force" in joined
     assert "keeps the task Running" in joined
+    assert "-DontStopOnIdleEnd" in joined
 
 
 def test_audit_rejects_a_non_waiting_shim() -> None:
