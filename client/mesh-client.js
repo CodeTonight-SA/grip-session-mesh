@@ -105,7 +105,29 @@ function drainOutbox() {
 // and depend on nobody; the client is the only one that dials out.
 function scheduleReconnect() {
   if (reconnectTimer) return;
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, RECONNECT_MS);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connectGuarded(); }, RECONNECT_MS);
+}
+
+// connect() can throw SYNCHRONOUSLY -- `new WebSocket(url)` raises on a malformed
+// URL, so a bad third argv kills the daemon on the spot. Measured: an unguarded
+// throw inside the reconnect timer escapes it and node exits 1.
+//
+// Be precise about what that is and is not. Exit 1 is NOT the silent death this
+// file exists to fix: Task Scheduler sees a FAILURE and -RestartCount does fire,
+// where the exit 0 of the old cold-start bug looked like success and fired
+// nothing. So this is hardening, not a second instance of that bug -- a review
+// concern that called it a deadlock was tested and refuted.
+//
+// It is still worth guarding. A crash-restart loop gives up after -RestartCount
+// attempts; an in-process retry does not, and it logs a readable line instead of
+// a stack trace every restart interval.
+function connectGuarded() {
+  try {
+    connect();
+  } catch (err) {
+    console.error(`[mesh-client] connect threw: ${(err && err.message) || err}`);
+    scheduleReconnect();
+  }
 }
 
 function connect() {
@@ -149,4 +171,4 @@ process.on('SIGTERM', () => { try { ws && ws.close(); } catch {} process.exit(0)
 process.on('SIGINT', () => { try { ws && ws.close(); } catch {} process.exit(0); });
 
 console.log(`[mesh-client] connecting name=${NAME} url=${URL}`);
-connect();
+connectGuarded();

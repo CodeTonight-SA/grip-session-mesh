@@ -46,10 +46,10 @@ function freePort() {
  * Spawn the client against a dead endpoint, with HOME redirected at a throwaway
  * directory so the test never touches the operator's real ~/.grip-session-mesh.
  */
-function spawnClientAtDeadPort(port) {
+function spawnClient(url) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-client-test-'));
   const env = { ...process.env, HOME: home, USERPROFILE: home };
-  const child = spawn(process.execPath, [CLIENT, 'cold-start-probe', `ws://127.0.0.1:${port}`], {
+  const child = spawn(process.execPath, [CLIENT, 'cold-start-probe', url], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -71,7 +71,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test('client survives a bus that is not listening yet', async (t) => {
   const port = await freePort();
-  const c = spawnClientAtDeadPort(port);
+  const c = spawnClient(`ws://127.0.0.1:${port}`);
   t.after(() => { try { c.child.kill(); } catch {} fs.rmSync(c.home, { recursive: true, force: true }); });
 
   const outcome = await Promise.race([c.exited, sleep(OBSERVE_MS).then(() => 'alive')]);
@@ -93,7 +93,7 @@ test('client survives a bus that is not listening yet', async (t) => {
 
 test('retrying does not fan out into parallel connect chains', async (t) => {
   const port = await freePort();
-  const c = spawnClientAtDeadPort(port);
+  const c = spawnClient(`ws://127.0.0.1:${port}`);
   t.after(() => { try { c.child.kill(); } catch {} fs.rmSync(c.home, { recursive: true, force: true }); });
 
   await Promise.race([c.exited, sleep(OBSERVE_MS)]);
@@ -104,4 +104,29 @@ test('retrying does not fan out into parallel connect chains', async (t) => {
   // scheduled, one client would multiply into several chains hammering the bus.
   const started = c.stdout.split('\n').filter((l) => l.includes('connecting')).length;
   assert.equal(started, 1, `expected a single connect chain, saw ${started} (stdout: ${c.stdout.trim()})`);
+});
+
+test('a synchronous throw in connect() does not kill the daemon', async (t) => {
+  // `new WebSocket(url)` raises on a malformed URL. Unguarded, that exception
+  // escapes the reconnect timer and node exits 1.
+  //
+  // Exit 1 is NOT the silent-success failure the first test pins -- Task
+  // Scheduler sees a failure and -RestartCount does fire. A review concern
+  // calling this a deadlock was tested and refuted; it is a crash. It is still
+  // guarded, because a crash-restart loop gives up after -RestartCount attempts
+  // and an in-process retry does not.
+  const c = spawnClient('not-a-url');
+  t.after(() => { try { c.child.kill(); } catch {} fs.rmSync(c.home, { recursive: true, force: true }); });
+
+  const outcome = await Promise.race([c.exited, sleep(5000).then(() => 'alive')]);
+
+  assert.equal(
+    outcome,
+    'alive',
+    `client exited (code=${outcome}) on a malformed URL instead of logging and ` +
+    `retrying. connect() must be called through connectGuarded(). stderr: ${c.stderr.trim()}`,
+  );
+
+  const thrown = c.stderr.split('\n').filter((l) => l.includes('connect threw')).length;
+  assert.ok(thrown >= 2, `expected repeated guarded retries, saw ${thrown}`);
 });
