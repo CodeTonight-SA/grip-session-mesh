@@ -9,6 +9,12 @@
   logon (New-ScheduledTaskTrigger -AtLogOn) and restarts on failure
   (RestartCount + RestartInterval) - the Task Scheduler equivalent of launchd's
   RunAtLoad + KeepAlive - so the mesh survives reboots and process death.
+
+  Each task runs a generated .cmd launcher through run-hidden.vbs under
+  wscript.exe, so NO console window appears at logon. Invoking the console
+  program directly under an Interactive principal drew one visible window per
+  task at every sign-in; see the comments in Install-MeshTask for the two
+  alternatives (-Hidden, S4U) that were measured and rejected.
   Idempotent: an existing task is Unregister-ed then re-registered. Runs as the
   current user with no elevation (a per-user ONLOGON task needs no admin).
 
@@ -98,23 +104,39 @@ function Resolve-MeshPython {
     throw "no python with 'websockets' found (pip install websockets). Pass -Python <path> to override."
 }
 
-function New-MeshCmdArgument {
-    # Build a `cmd.exe /c` line that runs Program with ProgArgs and appends
-    # stdout/stderr to the log files - the Scheduled-Task way to mirror launchd
-    # StandardOutPath / StandardErrorPath. All tokens are quoted so paths with
-    # spaces (e.g. C:\Users\Andre Theart\...) are safe; cmd strips only the
-    # outer pair, leaving the inner command and redirections intact.
+function New-MeshLauncher {
+    # Write a per-service .cmd launcher holding the real command line and its
+    # log redirection, and return its path - the Scheduled-Task way to mirror
+    # launchd StandardOutPath / StandardErrorPath. All tokens are quoted so
+    # paths with spaces (e.g. C:\Users\Andre Theart\...) are safe.
+    #
+    # Why a FILE and not an inline `cmd.exe /c "..."` argument: the task now
+    # runs through run-hidden.vbs (see Install-MeshTask) to suppress the
+    # console window, and that shim takes exactly ONE argument. Handing it a
+    # file path keeps quoting to a single level instead of nesting quotes
+    # inside quotes inside a WSH argument, which is where this breaks.
+    #
+    # The file is machine state - it holds absolute paths - so it lives beside
+    # the logs under $HOME, never in the repo.
     param(
         [string]$Program,
         [string[]]$ProgArgs,
         [string]$OutLog,
-        [string]$ErrLog
+        [string]$ErrLog,
+        [string]$LauncherDir,
+        [string]$Short
     )
     $parts = @('"{0}"' -f $Program)
     foreach ($a in $ProgArgs) { $parts += ('"{0}"' -f $a) }
-    $inner = ($parts -join ' ')
-    $inner += ' >> "{0}" 2>> "{1}"' -f $OutLog, $ErrLog
-    return '/c "{0}"' -f $inner
+    $line = ($parts -join ' ')
+    $line += ' >> "{0}" 2>> "{1}"' -f $OutLog, $ErrLog
+
+    $path = Join-Path $LauncherDir "$Short.cmd"
+    # Oem, not ASCII or UTF8: cmd.exe reads a .cmd in the console OEM codepage.
+    # ASCII would replace a non-ASCII path character (an accented user name)
+    # with '?' and silently break the launcher for that user.
+    Set-Content -Path $path -Value "@echo off`r`n$line" -Encoding Oem
+    return $path
 }
 
 function Install-MeshTask {
@@ -125,26 +147,62 @@ function Install-MeshTask {
         [string]$Short,
         [string]$RepoDir,
         [string]$LogsDir,
-        [string]$MeshUser
+        [string]$MeshUser,
+        [string]$LauncherDir,
+        [string]$VbsPath
     )
     $out = Join-Path $LogsDir "$Short.out.log"
     $err = Join-Path $LogsDir "$Short.err.log"
-    $arg = New-MeshCmdArgument -Program $Program -ProgArgs $ProgArgs -OutLog $out -ErrLog $err
+    $launcher = New-MeshLauncher -Program $Program -ProgArgs $ProgArgs -OutLog $out -ErrLog $err `
+                                 -LauncherDir $LauncherDir -Short $Short
 
-    $action  = New-ScheduledTaskAction -Execute $env:ComSpec -Argument $arg -WorkingDirectory $RepoDir
+    # Run the launcher through run-hidden.vbs under wscript.exe (a GUI-subsystem
+    # host) instead of invoking cmd.exe directly. Executing a console program
+    # under an Interactive principal draws a VISIBLE console window at every
+    # logon - one per task, three on screen every sign-in. Measured with a
+    # controlled probe: cmd.exe direct -> a visible top-level window; the same
+    # command through this shim -> none, with the task still in the Running
+    # state so -RestartCount below still applies. Full path, not a bare name,
+    # so resolution never depends on the task's inherited PATH.
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $action  = New-ScheduledTaskAction -Execute $wscript `
+                                       -Argument ('"{0}" "{1}"' -f $VbsPath, $launcher) `
+                                       -WorkingDirectory $RepoDir
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $MeshUser
+    # -DontStopOnIdleEnd is defence in depth, and is deliberately NOT a fix for
+    # anything observed. New-ScheduledTaskSettingsSet defaults StopOnIdleEnd to
+    # true, which tells Task Scheduler to STOP a running task when the machine
+    # stops being idle. It is inert while RunOnlyIfIdle stays false, so it has
+    # never fired here - checked on DESKTOP-6KG0VQ4 2026-09-22, all three tasks
+    # carried StopOnIdleEnd=true and none was stopped by it. But these are
+    # long-lived daemons that must never be stopped by a policy nobody set on
+    # purpose, and the default is one flag away from biting if RunOnlyIfIdle is
+    # ever switched on. Setting it explicitly costs nothing and removes the
+    # question.
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -DontStopOnIdleEnd `
         -MultipleInstances IgnoreNew
+    # Interactive is deliberate, and the two alternatives were measured, not assumed:
+    #   * -LogonType S4U runs non-interactively and would suppress the window by itself,
+    #     but Register-ScheduledTask then fails with "Access is denied"
+    #     (HRESULT 0x80070005) for a standard user - verified on Windows 11 Home. This
+    #     script's contract is that it needs no elevation, so S4U would break it.
+    #   * -Hidden on the settings set emits <Hidden>true</Hidden>, which hides the task
+    #     in the Task Scheduler UI and does nothing to the window. It is the fix
+    #     everybody reaches for first - do not.
+    # The window is suppressed by run-hidden.vbs in the action above instead.
     $principal = New-ScheduledTaskPrincipal -UserId $MeshUser -LogonType Interactive -RunLevel Limited
 
-    # Idempotent update: if the task exists, remove then re-register (mirrors kickstart -k).
-    if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $Name -Confirm:$false
-    }
-    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Settings $settings -Principal $principal | Out-Null
+    # Idempotent update via -Force (mirrors kickstart -k). NOT unregister-then-register:
+    # this script runs under $ErrorActionPreference = 'Stop', so a Register failure after
+    # an Unregister left the task DELETED and aborted the run, silently half-uninstalling
+    # the mesh. Observed exactly that while testing an S4U principal - 'GRIP Mesh Bus' was
+    # removed and never came back. -Force overwrites in one step, so a failed registration
+    # leaves the previous task intact.
+    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
     # Start now so the mesh runs immediately, not only at next logon (mirrors launchd bootstrap).
     Start-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
     Write-Host "registered + started: $Name"
@@ -176,6 +234,11 @@ $Repo = (Resolve-Path -LiteralPath $Repo).Path
 if (-not $SessionName) { $SessionName = Get-SessionSlug }
 $MeshUser = "$env:USERDOMAIN\$env:USERNAME"
 $LogsDir  = Join-Path $HOME '.grip-session-mesh\logs'
+# Generated per-service .cmd launchers. Machine state (absolute paths), so they
+# sit beside the logs under $HOME and are never committed to the repo.
+$LauncherDir = Join-Path $HOME '.grip-session-mesh\launchers'
+# The hidden-launch shim ships next to this script.
+$VbsPath = Join-Path $scriptDir 'run-hidden.vbs'
 
 # node is required for the bus + client tasks.
 $node = Get-Command node -ErrorAction SilentlyContinue
@@ -193,11 +256,18 @@ if (-not (Test-Path -LiteralPath $busEntry)) {
     throw "build the server first: npm install --prefix server && npm run build --prefix server"
 }
 
-New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
+# Fail loudly if the shim is missing rather than registering tasks that cannot
+# start - a half-installed mesh is worse than a refused install.
+if (-not (Test-Path -LiteralPath $VbsPath)) {
+    throw "run-hidden.vbs not found at $VbsPath (it ships alongside this script)"
+}
 
-Install-MeshTask -Name 'GRIP Mesh Bus'    -Program $NodePath -ProgArgs @($busEntry)                  -Short 'bus'    -RepoDir $Repo -LogsDir $LogsDir -MeshUser $MeshUser
-Install-MeshTask -Name 'GRIP Mesh Relay'  -Program $PyPath   -ProgArgs @($relayEntry, 'connect')     -Short 'relay'  -RepoDir $Repo -LogsDir $LogsDir -MeshUser $MeshUser
-Install-MeshTask -Name 'GRIP Mesh Client' -Program $NodePath -ProgArgs @($clientEntry, $SessionName) -Short 'client' -RepoDir $Repo -LogsDir $LogsDir -MeshUser $MeshUser
+New-Item -ItemType Directory -Force -Path $LogsDir     | Out-Null
+New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
+
+Install-MeshTask -Name 'GRIP Mesh Bus'    -Program $NodePath -ProgArgs @($busEntry)                  -Short 'bus'    -RepoDir $Repo -LogsDir $LogsDir -MeshUser $MeshUser -LauncherDir $LauncherDir -VbsPath $VbsPath
+Install-MeshTask -Name 'GRIP Mesh Relay'  -Program $PyPath   -ProgArgs @($relayEntry, 'connect')     -Short 'relay'  -RepoDir $Repo -LogsDir $LogsDir -MeshUser $MeshUser -LauncherDir $LauncherDir -VbsPath $VbsPath
+Install-MeshTask -Name 'GRIP Mesh Client' -Program $NodePath -ProgArgs @($clientEntry, $SessionName) -Short 'client' -RepoDir $Repo -LogsDir $LogsDir -MeshUser $MeshUser -LauncherDir $LauncherDir -VbsPath $VbsPath
 
 Write-Host ""
 Write-Host "grip-session-mesh persisted for session '$SessionName' (repo: $Repo)."
@@ -205,7 +275,9 @@ Write-Host "Three logon tasks run at sign-in and restart on failure:"
 Write-Host "  GRIP Mesh Bus     -> node   $busEntry"
 Write-Host "  GRIP Mesh Relay   -> python $relayEntry connect   ($PyPath)"
 Write-Host "  GRIP Mesh Client  -> node   $clientEntry $SessionName"
-Write-Host "Logs: $LogsDir\{bus,relay,client}.{out,err}.log"
+Write-Host "Logs:      $LogsDir\{bus,relay,client}.{out,err}.log"
+Write-Host "Launchers: $LauncherDir\{bus,relay,client}.cmd  (generated; run one by hand to debug)"
+Write-Host "Each task runs its launcher through $VbsPath so no console window appears."
 Write-Host "Note: the relay needs the shared team token at $HOME\.grip-session-mesh\token (placed by onboarding)."
 Write-Host ""
 Write-Host "Verify: Get-ScheduledTask -TaskName 'GRIP Mesh*'"
