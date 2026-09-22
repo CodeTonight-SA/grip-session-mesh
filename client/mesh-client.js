@@ -103,6 +103,12 @@ function drainOutbox() {
 // gave up 2.2s before the bus finished binding, and the mesh ran all day with
 // sessions:0. The bus and relay survive the same race because they bind a port
 // and depend on nobody; the client is the only one that dials out.
+function clearPendingReconnect() {
+  if (!reconnectTimer) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
 function scheduleReconnect() {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connectGuarded(); }, RECONNECT_MS);
@@ -131,8 +137,17 @@ function connectGuarded() {
 }
 
 function connect() {
+  const previous = ws;
   const sock = new WebSocket(URL);
   ws = sock;
+  // Drop the socket we are replacing rather than leaving it to the garbage
+  // collector with its listeners still attached. This is what makes the
+  // superseded() guard below load-bearing instead of theoretical: closing it
+  // fires ITS close handler, which must not stop the new socket's polling or
+  // queue a second reconnect.
+  if (previous && previous !== sock) {
+    try { previous.close(); } catch { /* already dead; nothing to release */ }
+  }
   // Events from a superseded socket are ignored. Without this, 'error' then
   // 'close' on the SAME dead socket would each schedule a reconnect once the
   // first timer had already fired, and the single client would fan out into
@@ -140,7 +155,32 @@ function connect() {
   const superseded = () => ws !== sock;
 
   sock.addEventListener('open', () => {
-    sock.send(JSON.stringify({ authorization: `Bearer ${token()}`, name: NAME }));
+    if (superseded()) return;
+    // A live connection cancels any pending retry. No code path currently
+    // creates a socket except the retry timer itself, so a timer should never
+    // be pending here -- but the cost of being wrong is a healthy connection
+    // torn down two seconds after it came up, and the cost of the check is one
+    // branch.
+    // token() reads ~/.grip-session-mesh/token on EVERY open, so the file being
+    // absent, unreadable or mid-rotation at this instant throws inside an event
+    // handler -- which is an unhandled exception, not a caught one, and killed
+    // the daemon outright. Found while testing: a client pointed at a home with
+    // no token connected, opened, and died with ENOENT.
+    //
+    // Treat it as a failed attempt rather than a fatal one. The token may be
+    // written moments later (the installer and the operator both create it), and
+    // a daemon that retries recovers by itself where a dead one needs a logon.
+    let auth;
+    try {
+      auth = JSON.stringify({ authorization: `Bearer ${token()}`, name: NAME });
+    } catch (err) {
+      console.error(`[mesh-client] cannot read token: ${(err && err.message) || err}`);
+      try { sock.close(); } catch { /* already gone */ }
+      scheduleReconnect();
+      return;
+    }
+    clearPendingReconnect();
+    sock.send(auth);
   });
 
   sock.addEventListener('message', (ev) => {
