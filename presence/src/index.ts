@@ -2,9 +2,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { getDb, openDb } from "./db.js";
-import { registerSession, heartbeat, deregister, listSessions } from "./registry.js";
+import { registerSession, heartbeat, deregister, listSessionsMarked } from "./registry.js";
 import { acquireLock, releaseLock, lockStatus } from "./locking.js";
-import { broadcast, readInbox } from "./inbox.js";
+import { broadcastToLive, readInbox } from "./inbox.js";
+import { currentLivenessContext } from "./liveness.js";
 
 const db = process.env.GRIP_PRESENCE_DB ? openDb(process.env.GRIP_PRESENCE_DB) : getDb();
 
@@ -33,16 +34,20 @@ const TOOLS = [
   },
   {
     name: "session_list",
-    description: "List all active sessions",
+    description: "List every registered session, including ones that have stopped. Each row carries " +
+      "`live`: true while its Claude Code process is running, or, for a session with no Claude Code " +
+      "record, while it has beaten within the last 180 seconds",
     inputSchema: { type: "object", properties: {} }
   },
   {
     name: "session_broadcast",
-    description: "Write a message to all sessions' inboxes",
+    description: "Queue a message in the inbox of every live session except the sender. Returns " +
+      "`sent_to` (sessions queued) and `skipped_not_live` (rows whose session is not running) separately",
     inputSchema: {
       type: "object",
       properties: {
-        from_name: { type: "string" }, body: { type: "string" }, kind: { type: "string" }
+        from_name: { type: "string" }, body: { type: "string" }, kind: { type: "string" },
+        from_id: { type: "string", description: "The sender's own session id, so it is left out" }
       },
       required: ["from_name", "body", "kind"]
     }
@@ -109,12 +114,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         deregister(db, a.id as string);
         return { ok: true };
       case "session_list":
-        return listSessions(db);
-      case "session_broadcast": {
-        const recipients = listSessions(db).map((s) => s.id);
-        broadcast(db, a.from_name as string, a.body as string, a.kind as string, recipients);
-        return { ok: true, sent_to: recipients.length };
-      }
+        return listSessionsMarked(db, currentLivenessContext());
+      case "session_broadcast":
+        return broadcastToLive(db, {
+          fromName: a.from_name as string, body: a.body as string, kind: a.kind as string,
+          senderId: typeof a.from_id === "string" ? a.from_id : undefined,
+        }, currentLivenessContext());
       case "lock_acquire":
         return acquireLock(db, a.resource as string, a.holder_id as string, a.holder_name as string, a.ttl_minutes as number | undefined);
       case "lock_release":

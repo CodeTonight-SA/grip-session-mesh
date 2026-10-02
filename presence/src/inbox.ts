@@ -1,5 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { v4 as uuidv4 } from "uuid";
+import { isLive, LivenessContext } from "./liveness.js";
+import { listSessions } from "./registry.js";
 
 export interface InboxMessage {
   id: string;
@@ -26,6 +28,32 @@ export function broadcast(
   for (const rid of recipientIds) {
     insert.run(uuidv4(), rid, fromName, body, kind, now);
   }
+}
+
+export interface BroadcastResult {
+  ok: true;
+  sent_to: number;
+  skipped_not_live: number;
+  sender_excluded: boolean;
+}
+
+// Queue one message for every running session except the sender, and say how
+// many rows were skipped as not running rather than counting them as sent.
+export function broadcastToLive(
+  db: DatabaseSync,
+  message: { fromName: string; body: string; kind: string; senderId?: string },
+  ctx: LivenessContext
+): BroadcastResult {
+  const everyone = listSessions(db);
+  const others = everyone.filter((session) => session.id !== message.senderId);
+  const live = others.filter((session) => isLive(session, ctx));
+  broadcast(db, message.fromName, message.body, message.kind, live.map((session) => session.id));
+  return {
+    ok: true,
+    sent_to: live.length,
+    skipped_not_live: others.length - live.length,
+    sender_excluded: others.length < everyone.length,
+  };
 }
 
 export function readInbox(

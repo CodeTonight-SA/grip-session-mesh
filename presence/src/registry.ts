@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { isLive, LivenessContext } from "./liveness.js";
 
 export interface Session {
   id: string;
@@ -38,4 +39,9 @@ export function deregister(db: DatabaseSync, id: string): void {
 
 export function listSessions(db: DatabaseSync): Session[] {
   return db.prepare(`SELECT * FROM sessions ORDER BY registered_at`).all() as unknown as Session[];
+}
+
+// Every row, each marked with whether its session is running (see liveness.ts).
+export function listSessionsMarked(db: DatabaseSync, ctx: LivenessContext): Array<Session & { live: boolean }> {
+  return listSessions(db).map((session) => ({ ...session, live: isLive(session, ctx) }));
 }
