@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isLive, pidAlive, readClaudeSessionPids, LivenessContext } from "../src/liveness.js";
+import { classify, pidAlive, readClaudeSessionPids, LivenessContext } from "../src/liveness.js";
 import type { Session } from "../src/registry.js";
 
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
@@ -24,29 +24,33 @@ function ctx(records: Record<string, number[]>): LivenessContext {
   };
 }
 
-test("a running Claude Code session is live however long it has been idle", () => {
-  assert.equal(isLive(row("cc-a", 6 * 3600), ctx({ a: [100] })), true);
+test("a running Claude Code session is running however long it has been idle", () => {
+  assert.equal(classify(row("cc-a", 6 * 3600), ctx({ a: [100] })), "running");
 });
 
-test("a session whose process is gone is not live, even with a fresh heartbeat", () => {
-  assert.equal(isLive(row("cc-a", 0), ctx({ a: [200] })), false);
+test("a session whose every process has exited is gone", () => {
+  assert.equal(classify(row("cc-a", 3600), ctx({ a: [200] })), "gone");
 });
 
-test("a session with a stale record and a running one is live", () => {
-  assert.equal(isLive(row("cc-a", 3600), ctx({ a: [200, 300] })), true);
+test("a dead pid with a fresh heartbeat is running: when unsure, queue", () => {
+  assert.equal(classify(row("cc-a", 0), ctx({ a: [200] })), "running");
 });
 
-test("a row with no record falls back to the 180-second heartbeat window", () => {
-  assert.equal(isLive(row("codex-1", 179), ctx({})), true);
-  assert.equal(isLive(row("codex-1", 181), ctx({})), false);
+test("a stale record beside a running one is running", () => {
+  assert.equal(classify(row("cc-a", 3600), ctx({ a: [200, 300] })), "running");
 });
 
-test("an unreadable heartbeat is not live", () => {
-  assert.equal(isLive({ ...row("codex-1", 0), last_heartbeat: "not a time" }, ctx({})), false);
+test("with no record, a beat inside 180 seconds is running and older is unconfirmed", () => {
+  assert.equal(classify(row("codex-1", 179), ctx({})), "running");
+  assert.equal(classify(row("codex-1", 181), ctx({})), "unconfirmed");
 });
 
-test("a cc-pid fallback id is judged by heartbeat, never mistaken for a session id", () => {
-  assert.equal(isLive(row("cc-pid-100", 3600), ctx({ a: [100] })), false);
+test("an unreadable heartbeat with no record is unconfirmed, never gone", () => {
+  assert.equal(classify({ ...row("codex-1", 0), last_heartbeat: "not a time" }, ctx({})), "unconfirmed");
+});
+
+test("a cc-pid fallback id is never read as a session id", () => {
+  assert.equal(classify(row("cc-pid-100", 3600), ctx({ a: [100] })), "unconfirmed");
 });
 
 test("records are grouped by sessionId and malformed files are ignored", () => {

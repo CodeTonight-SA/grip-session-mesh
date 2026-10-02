@@ -4,7 +4,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { getDb, openDb } from "./db.js";
 import { registerSession, heartbeat, deregister, listSessionsMarked } from "./registry.js";
 import { acquireLock, releaseLock, lockStatus } from "./locking.js";
-import { broadcastToLive, readInbox } from "./inbox.js";
+import { broadcastUnlessGone, readInbox } from "./inbox.js";
 import { currentLivenessContext } from "./liveness.js";
 
 const db = process.env.GRIP_PRESENCE_DB ? openDb(process.env.GRIP_PRESENCE_DB) : getDb();
@@ -35,14 +35,16 @@ const TOOLS = [
   {
     name: "session_list",
     description: "List every registered session, including ones that have stopped. Each row carries " +
-      "`live`: true while its Claude Code process is running, or, for a session with no Claude Code " +
-      "record, while it has beaten within the last 180 seconds",
+      "`liveness`: \"running\" (its Claude Code process is alive, or it beat within the last 180 " +
+      "seconds), \"gone\" (its Claude Code record names only exited processes) or \"unconfirmed\" " +
+      "(neither can be shown, as for other harnesses and other machines)",
     inputSchema: { type: "object", properties: {} }
   },
   {
     name: "session_broadcast",
-    description: "Queue a message in the inbox of every live session except the sender. Returns " +
-      "`sent_to` (sessions queued) and `skipped_not_live` (rows whose session is not running) separately",
+    description: "Queue a message for every session except the sender and those known to have gone. " +
+      "Sessions that cannot be confirmed either way are queued anyway. Returns `running`, " +
+      "`unconfirmed` and `gone` counts, and `sent_to` (running plus unconfirmed)",
     inputSchema: {
       type: "object",
       properties: {
@@ -116,7 +118,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "session_list":
         return listSessionsMarked(db, currentLivenessContext());
       case "session_broadcast":
-        return broadcastToLive(db, {
+        return broadcastUnlessGone(db, {
           fromName: a.from_name as string, body: a.body as string, kind: a.kind as string,
           senderId: typeof a.from_id === "string" ? a.from_id : undefined,
         }, currentLivenessContext());

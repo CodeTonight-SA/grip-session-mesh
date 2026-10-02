@@ -74,8 +74,8 @@ Exposes 9 MCP tools for coordination:
 | `session_register` | Register this session (called on `/mesh connect`) |
 | `session_heartbeat` | Update the heartbeat timestamp (on demand; nothing calls it on a timer) |
 | `session_deregister` | Leave the mesh (called on `/mesh disconnect`) |
-| `session_list` | List every registered session, each marked `live` or not |
-| `session_broadcast` | Queue a message for every live session except the sender; report sent and skipped counts |
+| `session_list` | List every registered session, each marked running, unconfirmed or gone |
+| `session_broadcast` | Queue a message for every session except the sender and the gone; report running, unconfirmed and gone counts |
 | `lock_acquire` | Claim an advisory lock on a resource |
 | `lock_release` | Release a held lock |
 | `lock_status` | Check all active locks |

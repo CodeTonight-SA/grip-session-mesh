@@ -1,16 +1,22 @@
-// Which session rows belong to a session that is actually running.
+// Whether a session row belongs to a session that is running, has gone, or
+// cannot be confirmed either way.
 //
 // A heartbeat alone cannot answer this. Nothing beats on a timer: GRIP's hook
 // refreshes last_heartbeat only on a tool call, so a session idle at its prompt
-// keeps a stale heartbeat for as long as its operator is away, and a heartbeat
-// window would drop it from every broadcast. Claude Code itself keeps one record
-// per running process, <config dir>/sessions/<pid>.json, naming the sessionId
-// that process is serving now, and removes it when the process exits. So:
+// keeps a stale heartbeat for as long as its operator is away. Claude Code itself
+// keeps one record per running process, <config dir>/sessions/<pid>.json, naming
+// the sessionId that process is serving now, and removes it when the process
+// exits. The rule (V>>, 2026-10-02):
 //
-//   - a row whose session has a Claude Code record is live while any of those
-//     processes is running, however old its heartbeat;
-//   - a row with no record (another harness, another machine, an id that /clear
-//     has replaced) is live only if it beat within HEARTBEAT_WINDOW_MS.
+//   running      a record names the session and one of its pids is alive, or
+//                the row beat within HEARTBEAT_WINDOW_MS;
+//   gone         a record names the session and every pid in it is dead;
+//   unconfirmed  neither: no record and no recent beat. Other harnesses, other
+//                machines, ids replaced by /clear, and local sessions whose
+//                record Claude Code has already removed all land here.
+//
+// Broadcast queues for running AND unconfirmed sessions and skips only the gone,
+// because a missed message is the failure this rule exists to prevent.
 import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +25,8 @@ import type { Session } from "./registry.js";
 // Three missed beats of a session that is working; GRIP's fleet-quit measured
 // live sessions beating every 30-60 s and chose the same window.
 export const HEARTBEAT_WINDOW_MS = 180_000;
+
+export type Liveness = "running" | "unconfirmed" | "gone";
 
 export interface LivenessContext {
   pidsBySession: Map<string, number[]>;
@@ -77,9 +85,13 @@ export function currentLivenessContext(): LivenessContext {
   };
 }
 
-export function isLive(session: Session, ctx: LivenessContext): boolean {
-  const pids = ctx.pidsBySession.get(session.id.replace(/^cc-/, ""));
-  if (pids) return pids.some(ctx.alive);
+function beatRecently(session: Session, ctx: LivenessContext): boolean {
   const beat = Date.parse(session.last_heartbeat);
   return Number.isFinite(beat) && ctx.nowMs - beat <= ctx.windowMs;
+}
+
+export function classify(session: Session, ctx: LivenessContext): Liveness {
+  const pids = ctx.pidsBySession.get(session.id.replace(/^cc-/, ""));
+  if (pids?.some(ctx.alive) || beatRecently(session, ctx)) return "running";
+  return pids ? "gone" : "unconfirmed";
 }

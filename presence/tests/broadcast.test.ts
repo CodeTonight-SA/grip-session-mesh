@@ -62,14 +62,16 @@ function buildFixture(): void {
   writeRecord(sessionsDir, "idle", process.pid);   // running, idle at its prompt
   writeRecord(sessionsDir, "busy", process.ppid);  // running and working
   writeRecord(sessionsDir, "ended", deadPid());    // record left behind by a crash
+  writeRecord(sessionsDir, "crashed", deadPid());  // crashed seconds after its last beat
   seed([
     ["cc-sender", 0],
-    ["cc-idle", 60 * MINUTE],        // stale heartbeat, yet the process is alive
-    ["cc-busy", 0],
-    ["cc-ended", 0],                 // fresh heartbeat, yet the process is gone
-    ["cc-cleared", 60 * MINUTE],     // id superseded by /clear: no record names it
-    ["codex-recent", 0.5 * MINUTE],  // another harness, beat 30 s ago
-    ["codex-silent", 10 * MINUTE],   // another harness, silent for 10 minutes
+    ["cc-idle", 60 * MINUTE],        // running: stale heartbeat, live process
+    ["cc-busy", 0],                  // running
+    ["cc-crashed", 0],               // running: dead pid but a fresh beat, so when unsure, queue
+    ["cc-ended", 60 * MINUTE],       // gone: its record names only a dead pid
+    ["cc-cleared", 60 * MINUTE],     // couldn't confirm: id replaced by /clear, no record
+    ["codex-recent", 0.5 * MINUTE],  // running: another harness, beat 30 s ago
+    ["codex-silent", 10 * MINUTE],   // couldn't confirm: another harness, silent 10 minutes
   ]);
 }
 
@@ -117,26 +119,33 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
 before(buildFixture);
 after(() => rmSync(work, { recursive: true, force: true }));
 
-test("broadcast queues for live sessions, never the sender, and counts the skipped", async () => {
+test("broadcast queues all but the gone and the sender, and reports three counts", async () => {
   const result = await callTool("session_broadcast", {
     from_name: "Sender", from_id: "cc-sender", body: "hello", kind: "info",
   });
-  assert.equal(result.sent_to, 3, "idle, busy and the recently-beating harness are live");
-  assert.equal(result.skipped_not_live, 3, "ended, cleared and the silent harness are not");
+  // Who gets the message comes first: when unsure, queue.
+  assert.deepEqual(inboxRecipients(), [
+    "cc-busy", "cc-cleared", "cc-crashed", "cc-idle", "codex-recent", "codex-silent",
+  ]);
+  assert.equal(result.running, 4, "idle, busy, crashed-but-fresh and the recent harness");
+  assert.equal(result.unconfirmed, 2, "cleared and the silent harness: queued anyway");
+  assert.equal(result.gone, 1, "only the ended session, whose record names a dead pid");
+  assert.equal(result.sent_to, 6, "running plus couldn't-confirm");
   assert.equal(result.sender_excluded, true);
-  assert.deepEqual(inboxRecipients(), ["cc-busy", "cc-idle", "codex-recent"]);
 });
 
-test("broadcast without from_id keeps the sender, and liveness still applies", async () => {
+test("broadcast without from_id keeps the sender, and the three-way rule still applies", async () => {
   const result = await callTool("session_broadcast", {
     from_name: "Anonymous", body: "again", kind: "info",
   });
-  assert.equal(result.sent_to, 4, "the sender's own row beat just now, so it is live");
-  assert.equal(result.skipped_not_live, 3);
+  assert.equal(result.running, 5, "the sender's own row beat just now, so it is running");
+  assert.equal(result.unconfirmed, 2);
+  assert.equal(result.gone, 1);
+  assert.equal(result.sent_to, 7);
   assert.equal(result.sender_excluded, false);
 });
 
-test("session_list says what it returns: every row, each marked live or not", async () => {
+test("session_list says what it returns: every row, each marked by the same rule", async () => {
   const [tools, listed] = await mcp([
     ["tools/list", {}],
     ["tools/call", { name: "session_list", arguments: {} }],
@@ -144,7 +153,9 @@ test("session_list says what it returns: every row, each marked live or not", as
   const description = tools.tools.find((t: any) => t.name === "session_list").description;
   assert.doesNotMatch(description, /\bactive\b/i, "it lists ended sessions too");
   const rows = JSON.parse(listed.content[0].text);
-  assert.equal(rows.length, 7);
-  const live = rows.filter((r: any) => r.live === true).map((r: any) => r.id).sort();
-  assert.deepEqual(live, ["cc-busy", "cc-idle", "cc-sender", "codex-recent"]);
+  const byState = (state: string) => rows.filter((r: any) => r.liveness === state).map((r: any) => r.id).sort();
+  assert.equal(rows.length, 8);
+  assert.deepEqual(byState("running"), ["cc-busy", "cc-crashed", "cc-idle", "cc-sender", "codex-recent"]);
+  assert.deepEqual(byState("unconfirmed"), ["cc-cleared", "codex-silent"]);
+  assert.deepEqual(byState("gone"), ["cc-ended"]);
 });

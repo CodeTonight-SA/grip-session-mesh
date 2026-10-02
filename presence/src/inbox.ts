@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { v4 as uuidv4 } from "uuid";
-import { isLive, LivenessContext } from "./liveness.js";
+import { classify, LivenessContext } from "./liveness.js";
 import { listSessions } from "./registry.js";
 
 export interface InboxMessage {
@@ -33,25 +33,34 @@ export function broadcast(
 export interface BroadcastResult {
   ok: true;
   sent_to: number;
-  skipped_not_live: number;
+  running: number;
+  unconfirmed: number;
+  gone: number;
   sender_excluded: boolean;
 }
 
-// Queue one message for every running session except the sender, and say how
-// many rows were skipped as not running rather than counting them as sent.
-export function broadcastToLive(
+// Queue one message for every session except the sender and those known to
+// have gone. Sessions that cannot be confirmed either way are queued anyway and
+// counted separately: a missed message is the failure this exists to prevent.
+export function broadcastUnlessGone(
   db: DatabaseSync,
   message: { fromName: string; body: string; kind: string; senderId?: string },
   ctx: LivenessContext
 ): BroadcastResult {
   const everyone = listSessions(db);
   const others = everyone.filter((session) => session.id !== message.senderId);
-  const live = others.filter((session) => isLive(session, ctx));
-  broadcast(db, message.fromName, message.body, message.kind, live.map((session) => session.id));
+  const counts = { running: 0, unconfirmed: 0, gone: 0 };
+  const recipients: string[] = [];
+  for (const session of others) {
+    const state = classify(session, ctx);
+    counts[state] += 1;
+    if (state !== "gone") recipients.push(session.id);
+  }
+  broadcast(db, message.fromName, message.body, message.kind, recipients);
   return {
     ok: true,
-    sent_to: live.length,
-    skipped_not_live: others.length - live.length,
+    sent_to: recipients.length,
+    ...counts,
     sender_excluded: others.length < everyone.length,
   };
 }
