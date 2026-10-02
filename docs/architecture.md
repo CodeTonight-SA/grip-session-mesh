@@ -72,10 +72,10 @@ Exposes 9 MCP tools for coordination:
 | Tool | Description |
 |------|-------------|
 | `session_register` | Register this session (called on `/mesh connect`) |
-| `session_heartbeat` | Update liveness timestamp (called every 30s) |
+| `session_heartbeat` | Update the heartbeat timestamp (on demand; nothing calls it on a timer) |
 | `session_deregister` | Leave the mesh (called on `/mesh disconnect`) |
-| `session_list` | List all sessions with last-seen timestamps |
-| `session_broadcast` | Write a message to all sessions' inboxes |
+| `session_list` | List every registered session, each marked running, unconfirmed or gone |
+| `session_broadcast` | Queue a message for every session except the sender and the gone; report running, unconfirmed and gone counts |
 | `lock_acquire` | Claim an advisory lock on a resource |
 | `lock_release` | Release a held lock |
 | `lock_status` | Check all active locks |
@@ -140,7 +140,7 @@ All runtime state lives in `~/.grip-session-mesh/`:
 
 - Layer 1 idle: **0 tokens** (Monitor watches a file; no CC call until message arrives)
 - Layer 1 message delivery: ~50-200 tokens per message (the message itself)
-- Layer 3 heartbeat: **0 tokens** (background process, not CC session)
+- Layer 3 liveness: **0 tokens** (read from Claude Code's own session records; no heartbeat process)
 - `/mesh list`: ~100 tokens (one MCP call)
 - `/mesh lock`: ~50 tokens (one MCP call)
 
