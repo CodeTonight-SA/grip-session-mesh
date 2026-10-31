@@ -39,6 +39,17 @@ class TestIncomingPeerAllowlist(unittest.TestCase):
     def test_missing_peername_is_refused(self):
         self.assertFalse(mesh_relay.is_allowed_peer(mesh_relay.peer_host(None), self.PEERS))
 
+    def test_other_address_forms_are_canonicalised(self):
+        self.assertEqual(mesh_relay.peer_host((f"::FFFF:{PEER}", 1, 0, 0)), PEER)
+        self.assertEqual(mesh_relay.peer_host((f"0:0:0:0:0:ffff:{PEER}", 1, 0, 0)), PEER)
+        self.assertTrue(mesh_relay.is_allowed_peer(PEER, [f" {PEER} "]))
+        self.assertTrue(mesh_relay.is_allowed_peer("fd7a:115c:a1e0::5", ["fd7a:115c:a1e0:0:0:0:0:5"]))
+
+    def test_empty_and_hostname_entries_match_nothing(self):
+        self.assertFalse(mesh_relay.is_allowed_peer("", [""]))
+        self.assertFalse(mesh_relay.is_allowed_peer(mesh_relay.peer_host(None), ["", "my-laptop.local"]))
+        self.assertFalse(mesh_relay.is_allowed_peer("my-laptop.local", ["my-laptop.local"]))
+
 
 class TestServeIncomingGate(unittest.TestCase):
     """serve_incoming must refuse a stranger BEFORE it logs into the bus."""
@@ -64,6 +75,23 @@ class TestServeIncomingGate(unittest.TestCase):
         writer, ws = self._run((PEER, 40000), [PEER])
         ws.connect.assert_called_once_with("ws://127.0.0.1:9474")
         writer.close.assert_called_once()
+
+    def test_mapped_listed_peer_is_joined(self):
+        _, ws = self._run((f"::ffff:{PEER}", 40000, 0, 0), [PEER])
+        ws.connect.assert_called_once_with("ws://127.0.0.1:9474")
+
+    def test_mapped_stranger_is_refused(self):
+        _, ws = self._run((f"::ffff:{STRANGER}", 40000, 0, 0), [PEER])
+        ws.connect.assert_not_called()
+
+    def test_missing_peername_with_a_blank_entry_is_refused(self):
+        writer, ws = self._run(None, ["", PEER])
+        ws.connect.assert_not_called()
+        writer.close.assert_called_once()
+
+    def test_loopback_is_joined(self):
+        _, ws = self._run(("127.0.0.1", 40000), [])
+        ws.connect.assert_called_once_with("ws://127.0.0.1:9474")
 
 
 if __name__ == "__main__":

@@ -136,27 +136,40 @@ async def relay_to_peer(peer_ip: str, token: str) -> None:
         delay = next(backoff_iter, 60)
 
 
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+def canonical_ip(text) -> str:
+    """``text`` as a canonical IP address (IPv4-mapped IPv6 unwrapped), or ""."""
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(str(text).strip())
+    except ValueError:
+        return ""
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return str(addr)
 
 
 def peer_host(peername) -> str:
-    """The caller's address from asyncio's peername, IPv4-mapped IPv6 unwrapped."""
-    if not peername:
-        return ""
-    host = str(peername[0])
-    return host[len("::ffff:"):] if host.startswith("::ffff:") else host
+    """The caller's canonical address from asyncio's peername, or "" if none."""
+    return canonical_ip(peername[0]) if peername else ""
 
 
 def is_allowed_peer(host: str, peers: list) -> bool:
     """True iff an incoming caller may be joined to the local bus.
 
     serve_incoming logs into the bus with this machine's own token on the
-    caller's behalf, so it accepts only loopback and the addresses listed in
-    peers.json. A device on the LAN cannot pose as a Tailscale peer: the reply
-    to a forged 100.x source goes into the tunnel, so the handshake never
-    completes.
+    caller's behalf, so it accepts only loopback and the IP addresses listed in
+    peers.json, compared in canonical form. An entry that is not an IP address,
+    such as a host name or an empty string, matches nothing. While Tailscale is
+    up, a LAN device cannot simply pose as a peer: the reply to a forged 100.x
+    source goes into the tunnel, so the TCP handshake never completes.
     """
-    return host in LOOPBACK_HOSTS or host in set(peers)
+    addr = canonical_ip(host)
+    if not addr:
+        return False
+    if addr == "::1" or addr.startswith("127."):
+        return True
+    return addr in {canonical_ip(p) for p in peers}
 
 
 async def serve_incoming(
@@ -195,6 +208,10 @@ async def serve_incoming(
 async def cmd_connect() -> None:
     token = read_token()
     peers = read_peers()
+    for entry in peers:
+        if not canonical_ip(entry):
+            print(f"[relay] peers.json entry {entry!r} is not an IP address: "
+                  "incoming connections from it will be refused", file=sys.stderr)
     local_ws_url = f"ws://127.0.0.1:{LOCAL_WS_PORT}"
 
     server = await asyncio.start_server(
