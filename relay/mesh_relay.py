@@ -22,13 +22,37 @@ BACKOFF_SEQUENCE = [1, 2, 4, 8, 16, 32, 60]
 # Peer file helpers
 # ---------------------------------------------------------------------------
 
+def _parse_peers(text: str) -> list:
+    """The peers list in peers.json's text; ValueError if its shape is wrong."""
+    data = json.loads(text)
+    peers = data.get("peers", []) if isinstance(data, dict) else None
+    if not isinstance(peers, list):
+        raise ValueError("peers.json must be an object whose 'peers' is a list")
+    return peers
+
+
 def read_peers() -> list:
-    if not PEERS_FILE.exists():
-        return []
+    """The peers list, or [] for a missing, unreadable or malformed file.
+
+    serve_incoming calls this on every connection, so it must never raise.
+    """
     try:
-        return json.loads(PEERS_FILE.read_text()).get("peers", [])
-    except (json.JSONDecodeError, KeyError):
+        return _parse_peers(PEERS_FILE.read_text())
+    except (OSError, ValueError, RecursionError):
         return []
+
+
+def read_peers_strict() -> list:
+    """The peers list for a command that rewrites peers.json.
+
+    [] only when the file does not exist. Any other failure raises, so a bad
+    read can never overwrite the real list.
+    """
+    try:
+        text = PEERS_FILE.read_text()
+    except FileNotFoundError:
+        return []
+    return _parse_peers(text)
 
 
 def write_peers(peers: list) -> None:
@@ -136,16 +160,57 @@ async def relay_to_peer(peer_ip: str, token: str) -> None:
         delay = next(backoff_iter, 60)
 
 
+def canonical_ip(text) -> str:
+    """``text`` as a canonical IP address (IPv4-mapped IPv6 unwrapped), or ""."""
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(str(text).strip())
+    except ValueError:
+        return ""
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return str(addr)
+
+
+def peer_host(peername) -> str:
+    """The caller's canonical address from asyncio's peername, or "" if none."""
+    return canonical_ip(peername[0]) if peername else ""
+
+
+def is_allowed_peer(host: str, peers: list) -> bool:
+    """True iff an incoming caller may be joined to the local bus.
+
+    serve_incoming logs into the bus with this machine's own token on the
+    caller's behalf, so it accepts only loopback and the IP addresses listed in
+    peers.json, compared in canonical form. An entry that is not an IP address,
+    such as a host name or an empty string, matches nothing. While Tailscale is
+    up, a LAN device cannot simply pose as a peer: the reply to a forged 100.x
+    source goes into the tunnel, so the TCP handshake never completes.
+    """
+    addr = canonical_ip(host)
+    if not addr:
+        return False
+    if addr == "::1" or addr.startswith("127."):
+        return True
+    return addr in {canonical_ip(p) for p in peers}
+
+
 async def serve_incoming(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     local_ws_url: str,
     token: str,
 ) -> None:
-    """Handle one incoming peer relay TCP connection."""
+    """Handle one incoming peer relay TCP connection; refuse any non-peer."""
+    peer = writer.get_extra_info("peername")
+    if not is_allowed_peer(peer_host(peer), read_peers()):
+        print(f"[relay] refused incoming from {peer}: not a listed peer", file=sys.stderr)
+        writer.close()
+        return
+
     import websockets
 
-    peer = writer.get_extra_info("peername")
     print(f"[relay] incoming from {peer}", file=sys.stderr)
     try:
         async with websockets.connect(local_ws_url) as ws:
@@ -167,6 +232,10 @@ async def serve_incoming(
 async def cmd_connect() -> None:
     token = read_token()
     peers = read_peers()
+    for entry in peers:
+        if not canonical_ip(entry):
+            print(f"[relay] peers.json entry {entry!r} is not an IP address: "
+                  "incoming connections from it will be refused", file=sys.stderr)
     local_ws_url = f"ws://127.0.0.1:{LOCAL_WS_PORT}"
 
     server = await asyncio.start_server(
@@ -182,7 +251,7 @@ async def cmd_connect() -> None:
 
 
 def cmd_remote_add(ip: str) -> None:
-    peers = read_peers()
+    peers = read_peers_strict()
     if ip not in peers:
         peers.append(ip)
         write_peers(peers)
@@ -192,7 +261,7 @@ def cmd_remote_add(ip: str) -> None:
 
 
 def cmd_remote_remove(ip: str) -> None:
-    peers = read_peers()
+    peers = read_peers_strict()
     if ip in peers:
         peers.remove(ip)
         write_peers(peers)
