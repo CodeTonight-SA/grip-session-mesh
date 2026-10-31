@@ -136,16 +136,44 @@ async def relay_to_peer(peer_ip: str, token: str) -> None:
         delay = next(backoff_iter, 60)
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+
+
+def peer_host(peername) -> str:
+    """The caller's address from asyncio's peername, IPv4-mapped IPv6 unwrapped."""
+    if not peername:
+        return ""
+    host = str(peername[0])
+    return host[len("::ffff:"):] if host.startswith("::ffff:") else host
+
+
+def is_allowed_peer(host: str, peers: list) -> bool:
+    """True iff an incoming caller may be joined to the local bus.
+
+    serve_incoming logs into the bus with this machine's own token on the
+    caller's behalf, so it accepts only loopback and the addresses listed in
+    peers.json. A device on the LAN cannot pose as a Tailscale peer: the reply
+    to a forged 100.x source goes into the tunnel, so the handshake never
+    completes.
+    """
+    return host in LOOPBACK_HOSTS or host in set(peers)
+
+
 async def serve_incoming(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     local_ws_url: str,
     token: str,
 ) -> None:
-    """Handle one incoming peer relay TCP connection."""
+    """Handle one incoming peer relay TCP connection; refuse any non-peer."""
+    peer = writer.get_extra_info("peername")
+    if not is_allowed_peer(peer_host(peer), read_peers()):
+        print(f"[relay] refused incoming from {peer}: not a listed peer", file=sys.stderr)
+        writer.close()
+        return
+
     import websockets
 
-    peer = writer.get_extra_info("peername")
     print(f"[relay] incoming from {peer}", file=sys.stderr)
     try:
         async with websockets.connect(local_ws_url) as ws:
