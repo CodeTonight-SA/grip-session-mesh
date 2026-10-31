@@ -94,5 +94,33 @@ class TestServeIncomingGate(unittest.TestCase):
         ws.connect.assert_called_once_with("ws://127.0.0.1:9474")
 
 
+class TestReadPeersNeverRaises(unittest.TestCase):
+    """serve_incoming reads peers.json on every connection, so a bad file must
+    give an empty list (which refuses everyone but loopback), never an exception."""
+
+    def _read(self, text=None, error=None):
+        fake = MagicMock()
+        fake.exists.return_value = True
+        fake.read_text.return_value = text
+        fake.read_text.side_effect = error
+        with patch.object(mesh_relay, "PEERS_FILE", fake):
+            return mesh_relay.read_peers()
+
+    def test_json_that_is_not_an_object(self):
+        self.assertEqual(self._read(f'["{PEER}"]'), [])
+
+    def test_null_peers(self):
+        self.assertEqual(self._read('{"peers": null}'), [])
+
+    def test_string_peers(self):
+        self.assertEqual(self._read(f'{{"peers": "{PEER}"}}'), [])
+
+    def test_unreadable_file(self):
+        self.assertEqual(self._read(error=PermissionError("denied")), [])
+
+    def test_valid_file(self):
+        self.assertEqual(self._read(f'{{"peers": ["{PEER}"]}}'), [PEER])
+
+
 if __name__ == "__main__":
     unittest.main()

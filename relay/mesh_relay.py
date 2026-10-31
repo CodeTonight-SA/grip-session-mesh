@@ -23,12 +23,17 @@ BACKOFF_SEQUENCE = [1, 2, 4, 8, 16, 32, 60]
 # ---------------------------------------------------------------------------
 
 def read_peers() -> list:
+    """The peers list, or [] for a missing, unreadable or malformed file.
+
+    serve_incoming calls this on every connection, so it must never raise.
+    """
     if not PEERS_FILE.exists():
         return []
     try:
-        return json.loads(PEERS_FILE.read_text()).get("peers", [])
-    except (json.JSONDecodeError, KeyError):
+        peers = json.loads(PEERS_FILE.read_text()).get("peers", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
         return []
+    return peers if isinstance(peers, list) else []
 
 
 def write_peers(peers: list) -> None:
