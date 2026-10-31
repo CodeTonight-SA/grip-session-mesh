@@ -94,16 +94,22 @@ class TestServeIncomingGate(unittest.TestCase):
         ws.connect.assert_called_once_with("ws://127.0.0.1:9474")
 
 
+def _fake_peers_file(text=None, error=None, exists_error=None):
+    """A stand-in for PEERS_FILE whose read returns ``text`` or raises ``error``."""
+    fake = MagicMock()
+    fake.exists.return_value = True
+    fake.exists.side_effect = exists_error
+    fake.read_text.return_value = text
+    fake.read_text.side_effect = error
+    return fake
+
+
 class TestReadPeersNeverRaises(unittest.TestCase):
     """serve_incoming reads peers.json on every connection, so a bad file must
     give an empty list (which refuses everyone but loopback), never an exception."""
 
-    def _read(self, text=None, error=None):
-        fake = MagicMock()
-        fake.exists.return_value = True
-        fake.read_text.return_value = text
-        fake.read_text.side_effect = error
-        with patch.object(mesh_relay, "PEERS_FILE", fake):
+    def _read(self, text=None, error=None, exists_error=None):
+        with patch.object(mesh_relay, "PEERS_FILE", _fake_peers_file(text, error, exists_error)):
             return mesh_relay.read_peers()
 
     def test_json_that_is_not_an_object(self):
@@ -118,8 +124,52 @@ class TestReadPeersNeverRaises(unittest.TestCase):
     def test_unreadable_file(self):
         self.assertEqual(self._read(error=PermissionError("denied")), [])
 
+    def test_invalid_utf8(self):
+        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        self.assertEqual(self._read(error=error), [])
+
+    def test_oversized_integer(self):
+        self.assertEqual(self._read('{"peers": [' + "9" * 5000 + "]}"), [])
+
+    def test_deep_nesting(self):
+        self.assertEqual(self._read("[" * 100000), [])
+
+    def test_recursion_error_is_caught(self):
+        """Older Pythons raise RecursionError on deep nesting; 3.14 does not."""
+        self.assertEqual(self._read(error=RecursionError("maximum recursion depth exceeded")), [])
+
+    def test_a_failing_exists_check_is_not_consulted(self):
+        valid = f'{{"peers": ["{PEER}"]}}'
+        self.assertEqual(self._read(valid, exists_error=PermissionError("denied")), [PEER])
+
     def test_valid_file(self):
         self.assertEqual(self._read(f'{{"peers": ["{PEER}"]}}'), [PEER])
+
+
+class TestPeerCommandsNeverOverwriteOnABadRead(unittest.TestCase):
+    """remote add and remove rewrite peers.json, so a failed read must not
+    count as an empty list."""
+
+    def test_missing_file_starts_empty(self):
+        with patch.object(mesh_relay, "PEERS_FILE", _fake_peers_file(error=FileNotFoundError("gone"))):
+            self.assertEqual(mesh_relay.read_peers_strict(), [])
+
+    def test_unreadable_file_raises(self):
+        with patch.object(mesh_relay, "PEERS_FILE", _fake_peers_file(error=PermissionError("denied"))):
+            with self.assertRaises(PermissionError):
+                mesh_relay.read_peers_strict()
+
+    def test_malformed_file_raises(self):
+        with patch.object(mesh_relay, "PEERS_FILE", _fake_peers_file("{bad")):
+            with self.assertRaises(ValueError):
+                mesh_relay.read_peers_strict()
+
+    def test_remote_add_does_not_overwrite_an_unreadable_file(self):
+        with patch.object(mesh_relay, "PEERS_FILE", _fake_peers_file(error=PermissionError("denied"))), \
+                patch.object(mesh_relay, "write_peers") as write:
+            with self.assertRaises(PermissionError):
+                mesh_relay.cmd_remote_add(PEER)
+        write.assert_not_called()
 
 
 if __name__ == "__main__":

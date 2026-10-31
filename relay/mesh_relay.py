@@ -22,18 +22,37 @@ BACKOFF_SEQUENCE = [1, 2, 4, 8, 16, 32, 60]
 # Peer file helpers
 # ---------------------------------------------------------------------------
 
+def _parse_peers(text: str) -> list:
+    """The peers list in peers.json's text; ValueError if its shape is wrong."""
+    data = json.loads(text)
+    peers = data.get("peers", []) if isinstance(data, dict) else None
+    if not isinstance(peers, list):
+        raise ValueError("peers.json must be an object whose 'peers' is a list")
+    return peers
+
+
 def read_peers() -> list:
     """The peers list, or [] for a missing, unreadable or malformed file.
 
     serve_incoming calls this on every connection, so it must never raise.
     """
-    if not PEERS_FILE.exists():
-        return []
     try:
-        peers = json.loads(PEERS_FILE.read_text()).get("peers", [])
-    except (OSError, json.JSONDecodeError, AttributeError):
+        return _parse_peers(PEERS_FILE.read_text())
+    except (OSError, ValueError, RecursionError):
         return []
-    return peers if isinstance(peers, list) else []
+
+
+def read_peers_strict() -> list:
+    """The peers list for a command that rewrites peers.json.
+
+    [] only when the file does not exist. Any other failure raises, so a bad
+    read can never overwrite the real list.
+    """
+    try:
+        text = PEERS_FILE.read_text()
+    except FileNotFoundError:
+        return []
+    return _parse_peers(text)
 
 
 def write_peers(peers: list) -> None:
@@ -232,7 +251,7 @@ async def cmd_connect() -> None:
 
 
 def cmd_remote_add(ip: str) -> None:
-    peers = read_peers()
+    peers = read_peers_strict()
     if ip not in peers:
         peers.append(ip)
         write_peers(peers)
@@ -242,7 +261,7 @@ def cmd_remote_add(ip: str) -> None:
 
 
 def cmd_remote_remove(ip: str) -> None:
-    peers = read_peers()
+    peers = read_peers_strict()
     if ip in peers:
         peers.remove(ip)
         write_peers(peers)
